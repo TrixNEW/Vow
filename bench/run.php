@@ -3,8 +3,7 @@
 declare(strict_types=1);
 
 // Usage: php run.php [--rounds=5] [--samples=5] [--filter=text] [--only=vow,quark] [--no-jit|--jit] [--out=RESULTS.md]
-// Every measurement runs in a fresh process so JIT traces and heap state never leak between libraries, and the
-// libraries take turns across rounds so machine noise and thermal drift hit all of them alike.
+// Fresh processes isolate JIT traces and heap state between measurements.
 
 use Amp\DeferredFuture;
 use quark\network\mcpe\compression\CompressBatchPromise;

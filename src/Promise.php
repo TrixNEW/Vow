@@ -12,16 +12,12 @@ use Throwable;
 use ValueError;
 use WeakMap;
 
+use function array_keys;
 use function count;
 
 /**
- * A read-only view of a value that may not be available yet.
- *
- * Callbacks run synchronously: when the promise settles they run before the settling call returns, and when it
- * is already settled they run before the registering call returns. A promise's callbacks always run in the
- * order they were registered, and derived promises settle only after their parent finished its own callbacks.
- *
- * Pending promises come from a Deferred, which is the only way to settle them.
+ * Callbacks run synchronously in registration order.
+ * Derived promises settle after their parent's callbacks.
  *
  * @template-covariant T
  */
@@ -43,7 +39,8 @@ final class Promise
      */
     private ?array $handlers = [];
 
-    private ?UnhandledRejection $unhandled = null;
+    /** False marks a handled rejection, including during callback dispatch. */
+    private UnhandledRejection|false|null $unhandled = null;
 
     /** @var WeakMap<Fiber<mixed, mixed, mixed, mixed>, Promise<mixed>>|null */
     private static ?WeakMap $fibers = null;
@@ -79,8 +76,8 @@ final class Promise
     }
 
     /**
-     * Sets the callback for rejections nobody handled, returning the previous one. Reports happen when the last
-     * reference to the rejected promise goes away. Pass null to restore the default, which writes to error_log().
+     * Sets the callback for unhandled rejections and returns the previous one.
+     * Rejections are reported when the promise is released, using error_log() if the handler is null.
      *
      * @param (Closure(Throwable): void)|null $handler
      * @return (Closure(Throwable): void)|null
@@ -93,8 +90,8 @@ final class Promise
     }
 
     /**
-     * Returns a promise for the callbacks' result, adopting it when a callback returns a promise. A missing
-     * callback passes the outcome through, and a callback that throws rejects the returned promise.
+     * Adopts returned promises and rejects when a callback throws.
+     * Missing callbacks pass the outcome through.
      *
      * @template TFulfilled
      * @template TRejected
@@ -111,7 +108,7 @@ final class Promise
             $this->handlers[] = $child;
             return $child;
         }
-        if ($this->unhandled !== null) {
+        if ($this->unhandled instanceof UnhandledRejection) {
             $this->handle();
         }
         if (self::invoke($this->state === self::FULFILLED, $this->result, $onFulfilled, $onRejected, $child)) {
@@ -134,8 +131,8 @@ final class Promise
     }
 
     /**
-     * Runs the callback once settled and passes the original outcome through, unless the callback throws or
-     * returns a promise that rejects. A returned promise is waited for first.
+     * Waits for the callback's result, then passes the original outcome through.
+     * A thrown exception or rejected promise overrides the outcome.
      *
      * @param Closure(): mixed $onSettled
      * @return Promise<T>
@@ -158,9 +155,8 @@ final class Promise
     }
 
     /**
-     * Listens for the outcome without creating another promise. This is the cheapest way to consume a promise.
-     * If a callback throws, the remaining callbacks still run and the first exception is rethrown to whoever
-     * settled the promise, or straight to the caller when the promise was already settled.
+     * Observes the outcome without creating another promise.
+     * If a callback throws, remaining callbacks still run before the first exception is rethrown.
      *
      * @param (Closure(T): mixed)|null $onFulfilled
      * @param (Closure(Throwable): mixed)|null $onRejected
@@ -176,7 +172,7 @@ final class Promise
                 $onFulfilled($this->result);
             }
         } elseif ($onRejected !== null && ($reason = $this->result) instanceof Throwable) {
-            if ($this->unhandled !== null) {
+            if ($this->unhandled instanceof UnhandledRejection) {
                 $this->handle();
             }
             $onRejected($reason);
@@ -199,8 +195,6 @@ final class Promise
     }
 
     /**
-     * Returns the value, or throws the rejection reason.
-     *
      * @return T
      * @throws Throwable the rejection reason, or a LogicException if the promise is still pending
      */
@@ -212,9 +206,6 @@ final class Promise
         throw $this->reason() ?? new LogicException('Promise is still pending');
     }
 
-    /**
-     * Returns the rejection reason, or null unless the promise was rejected.
-     */
     public function reason(): ?Throwable
     {
         $reason = $this->result;
@@ -284,23 +275,29 @@ final class Promise
         if ($remaining === 0) {
             return self::resolved([]);
         }
-        $result = new self();
+        $pending = $result = new self();
         $values = $promises;
-        $onRejected = static function (Throwable $reason) use ($result): void {
-            if ($result->state === self::PENDING) {
+        $onRejected = static function (Throwable $reason) use (&$pending, &$values): void {
+            if ($pending !== null) {
+                $result = $pending;
+                $pending = null;
+                $values = [];
                 $result->settle(false, $reason);
             }
         };
         foreach ($promises as $key => $promise) {
             $promise->observe(
-                static function (mixed $value) use ($key, &$values, &$remaining, $result): void {
-                    if ($result->state !== self::PENDING) {
+                static function (mixed $value) use ($key, &$values, &$remaining, &$pending): void {
+                    if ($pending === null) {
                         return;
                     }
                     $values[$key] = $value;
                     if (--$remaining === 0) {
-                        $result->settle(true, $values);
+                        $result = $pending;
+                        $pending = null;
+                        $resolved = $values;
                         $values = [];
+                        $result->settle(true, $resolved);
                     }
                 },
                 $onRejected,
@@ -351,14 +348,18 @@ final class Promise
         if ($promises === []) {
             throw new ValueError('Cannot race an empty array of promises');
         }
-        $result = new self();
-        $onFulfilled = static function (mixed $value) use ($result): void {
-            if ($result->state === self::PENDING) {
+        $pending = $result = new self();
+        $onFulfilled = static function (mixed $value) use (&$pending): void {
+            if ($pending !== null) {
+                $result = $pending;
+                $pending = null;
                 $result->settle(true, $value);
             }
         };
-        $onRejected = static function (Throwable $reason) use ($result): void {
-            if ($result->state === self::PENDING) {
+        $onRejected = static function (Throwable $reason) use (&$pending): void {
+            if ($pending !== null) {
+                $result = $pending;
+                $pending = null;
                 $result->settle(false, $reason);
             }
         };
@@ -386,26 +387,33 @@ final class Promise
         if ($remaining === 0) {
             return self::rejected(new AggregateException([]));
         }
-        $result = new self();
+        $pending = $result = new self();
+        $keys = array_keys($promises);
         $reasons = [];
-        $onFulfilled = static function (mixed $value) use ($result): void {
-            if ($result->state === self::PENDING) {
+        $onFulfilled = static function (mixed $value) use (&$pending, &$reasons): void {
+            if ($pending !== null) {
+                $result = $pending;
+                $pending = null;
+                $reasons = [];
                 $result->settle(true, $value);
             }
         };
         foreach ($promises as $key => $promise) {
             $promise->observe(
                 $onFulfilled,
-                static function (Throwable $reason) use ($key, &$reasons, &$remaining, $result, $promises): void {
-                    if ($result->state !== self::PENDING) {
+                static function (Throwable $reason) use ($key, &$reasons, &$remaining, &$pending, $keys): void {
+                    if ($pending === null) {
                         return;
                     }
                     $reasons[$key] = $reason;
                     if (--$remaining === 0) {
+                        $result = $pending;
+                        $pending = null;
                         $ordered = [];
-                        foreach ($promises as $k => $_) {
-                            $ordered[$k] = $reasons[$k];
+                        foreach ($keys as $key) {
+                            $ordered[$key] = $reasons[$key];
                         }
+                        $reasons = [];
                         $result->settle(false, new AggregateException($ordered));
                     }
                 },
@@ -441,8 +449,12 @@ final class Promise
             return;
         }
 
-        // Derived promises settled along the way are queued and run after this one, which keeps long chains off
-        // the call stack. Handlers registered while these run land in the fresh array and get picked up next pass.
+        $this->drain($fulfilled, $result);
+    }
+
+    private function drain(bool $fulfilled, mixed $result): void
+    {
+        // Queue derived promises to keep long chains off the call stack.
         $current = $this;
         $queue = [];
         $error = null;
@@ -500,22 +512,22 @@ final class Promise
 
     private function track(): void
     {
-        if ($this->result instanceof Throwable && !$this->result instanceof CancelledException) {
+        if ($this->unhandled !== false && $this->result instanceof Throwable && !$this->result instanceof CancelledException) {
             $this->unhandled = new UnhandledRejection($this->result);
         }
     }
 
     private function handle(): void
     {
-        if ($this->unhandled !== null) {
+        if ($this->unhandled instanceof UnhandledRejection) {
             $this->unhandled->reason = null;
-            $this->unhandled = null;
         }
+        $this->unhandled = false;
     }
 
     /**
-     * Settles the child of a then() from its parent's outcome. Returns whether the child settled right away and
-     * needs its handlers run, as opposed to following a promise that is still pending.
+     * Runs a chain callback and reports whether the child is ready to drain.
+     * Returns false while the child follows a pending promise.
      *
      * @param Closure|Promise<mixed>|null $onFulfilled
      * @param Closure|Promise<mixed>|null $onRejected
@@ -546,7 +558,7 @@ final class Promise
      */
     private function adopt(Promise $target): bool
     {
-        // follow the chain to its end so later adopters link there directly and chains stay short
+        // Follow the root so later adopters keep chains short.
         $root = $target;
         while ($root !== $this) {
             $next = $root->result;
@@ -596,13 +608,10 @@ final class Promise
             return;
         }
         unset($fibers[$fiber]);
-        if ($value === $promise) {
-            $promise->settle(false, new LogicException('Circular promise resolution'));
-        } elseif ($value instanceof self) {
-            $value->observe(
-                static function (mixed $value) use ($promise): void { $promise->settle(true, $value); },
-                static function (Throwable $reason) use ($promise): void { $promise->settle(false, $reason); },
-            );
+        if ($value instanceof self) {
+            if ($promise->adopt($value)) {
+                $promise->drain($promise->state === self::FULFILLED, $promise->result);
+            }
         } else {
             $promise->settle(true, $value);
         }

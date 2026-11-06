@@ -37,7 +37,7 @@ final class UnhandledRejection
                 (self::$handler)($reason);
                 return;
             } catch (Throwable $e) {
-                // destructors run at unpredictable points so a throwing handler must not escape
+                // Keep handler exceptions from escaping a destructor.
                 error_log('Promise rejection handler threw: ' . $e);
             }
         }

@@ -57,6 +57,19 @@ final class LifecycleTest extends TestCase
         self::assertCount(1, $this->unhandled);
     }
 
+    public function testReadingQueuedRejectionHandlesIt(): void
+    {
+        $deferred = new Deferred();
+        $reason = new RuntimeException();
+        $child = $deferred->promise->then(fn(): never => throw $reason);
+        $deferred->promise->observe(function () use ($child, $reason): void {
+            self::assertSame($reason, $child->reason());
+        });
+        $deferred->resolve(null);
+        unset($deferred, $child);
+        self::assertSame([], $this->unhandled);
+    }
+
     public function testThrowingCallbackWithoutCatchIsReported(): void
     {
         Promise::resolved(1)->then(fn(): never => throw new RuntimeException('bug'));
@@ -116,6 +129,60 @@ final class LifecycleTest extends TestCase
         unset($deferred);
         gc_collect_cycles();
         self::assertNull($ref->get());
+    }
+
+    public function testShortCircuitCombinatorsReleaseResultsWithPendingInputs(): void
+    {
+        foreach (['all' => Promise::all(...), 'race' => Promise::race(...), 'any' => Promise::any(...)] as $method => $combine) {
+            $pending = new Deferred();
+            $winner = new Deferred();
+            $result = $combine([$pending->promise, $winner->promise]);
+            $ref = \WeakReference::create($result);
+            if ($method === 'all') {
+                $winner->reject(new RuntimeException());
+                $result->reason();
+            } else {
+                $winner->resolve(null);
+            }
+            unset($result);
+            self::assertNull($ref->get(), $method);
+            $pending->resolve(null);
+        }
+    }
+
+    public function testFailedAllReleasesValuesWithPendingInputs(): void
+    {
+        $payload = new \stdClass();
+        $ref = \WeakReference::create($payload);
+        $pending = new Deferred();
+        $failure = new Deferred();
+        $all = Promise::all([Promise::resolved($payload), $failure->promise, $pending->promise]);
+        unset($payload);
+        $failure->reject(new RuntimeException());
+        $all->reason();
+        self::assertNull($ref->get());
+        $pending->resolve(null);
+    }
+
+    public function testSuccessfulAnyReleasesRejectionsWithPendingInputs(): void
+    {
+        $reason = new RuntimeException();
+        $ref = \WeakReference::create($reason);
+        $pending = new Deferred();
+        $winner = new Deferred();
+        $any = Promise::any([Promise::rejected($reason), $pending->promise, $winner->promise]);
+        unset($reason);
+        $error = new RuntimeException('observer');
+        $any->observe(fn(): never => throw $error);
+        try {
+            $winner->resolve(null);
+            self::fail('observer exception');
+        } catch (RuntimeException $caught) {
+            self::assertSame($error, $caught);
+        }
+        self::assertNull($ref->get());
+        self::assertNull($any->value());
+        $pending->resolve(null);
     }
 
     public function testTimeoutRecipeWithLateWorkerCompletion(): void

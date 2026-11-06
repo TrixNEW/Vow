@@ -2,9 +2,8 @@
 
 declare(strict_types=1);
 
-// Each scenario runs the same workload through every library's native API. A closure receives the number of
-// operations to perform; the runner divides the elapsed time by it. Handlers are created once outside the
-// timed loop unless the scenario is about realistic call sites, so the numbers measure the library itself.
+// Each closure runs the same workload using its library's native API.
+// Shared handlers keep closure allocation out of the measurements unless the scenario needs it.
 
 use Amp\DeferredFuture;
 use quark\network\mcpe\compression\CompressBatchPromise;

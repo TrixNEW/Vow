@@ -39,9 +39,8 @@ final class Deferred
     }
 
     /**
-     * Rejects with a CancelledException if still pending. Later resolve() and reject() calls are ignored, so a
-     * worker finishing after a cancellation or timeout is harmless. Cancelled promises are never reported as
-     * unhandled.
+     * Cancels a pending promise and ignores later results.
+     * Cancelled promises are never reported as unhandled.
      */
     public function cancel(?CancelledException $reason = null): void
     {

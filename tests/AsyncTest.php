@@ -102,4 +102,43 @@ final class AsyncTest extends TestCase
         $deferred->resolve(1);
         self::assertNull($inside);
     }
+
+    public function testCircularAsyncAdoptionRejects(): void
+    {
+        $a = new Deferred();
+        $b = new Deferred();
+        $second = null;
+        $first = Promise::async(function () use ($a, &$second): ?Promise {
+            $a->promise->await();
+            return $second;
+        });
+        $second = Promise::async(function () use ($b, $first): Promise {
+            $b->promise->await();
+            return $first;
+        });
+        $a->resolve(null);
+        $b->resolve(null);
+        self::assertInstanceOf(LogicException::class, $first->reason());
+        self::assertInstanceOf(LogicException::class, $second->reason());
+    }
+
+    public function testAsyncReturningRejectedPromisePreservesReason(): void
+    {
+        $reason = new RuntimeException();
+        $promise = Promise::async(fn(): Promise => Promise::rejected($reason));
+        self::assertSame($reason, $promise->reason());
+        self::assertSame([], $this->unhandled);
+    }
+
+    public function testLongAsyncAdoptionChainDoesNotExhaustTheStack(): void
+    {
+        $root = new Deferred();
+        $promise = $root->promise;
+        for ($i = 0; $i < 100_000; ++$i) {
+            $inner = $promise;
+            $promise = Promise::async(fn(): Promise => $inner);
+        }
+        $root->resolve('deep');
+        self::assertSame('deep', $promise->value());
+    }
 }
