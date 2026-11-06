@@ -1,129 +1,130 @@
 # Vow
 
-Fast, synchronous, strongly typed promises for PHP 8.4. No dependencies and no event loop.
-
-Vow was written to replace the promises in [Quark](https://github.com/Bedrock-Phanatics/Quark), a Minecraft server that
-settles thousands of promises per tick, but it has nothing Quark specific in it.
+Synchronous, strongly typed promises for PHP 8.4. No dependencies, no event loop.
 
 ```
 composer require trix/vow
 ```
 
-## Usage
-
-A `Deferred` settles a promise and a `Promise` is the read-only side you hand out.
+## Quick start
 
 ```php
 use Vow\Deferred;
+
+$deferred = new Deferred();
+$deferred->promise->observe(
+    fn (string $body) => print "got $body\n",
+    fn (Throwable $e) => print "failed: {$e->getMessage()}\n",
+);
+
+$deferred->resolve('hello'); // or $deferred->reject(new RuntimeException('boom'))
+```
+
+Keep the `Deferred` with the operation and hand out `$deferred->promise`. The promise is read-only, so consumers cannot settle it.
+
+## API
+
+```php
 use Vow\Promise;
 
-/** @return Promise<Chunk> */
-function loadChunk(int $x, int $z): Promise
-{
-    /** @var Deferred<Chunk> $deferred */
-    $deferred = new Deferred();
-    $pool->submit(new LoadChunkTask($x, $z, $deferred->resolve(...), $deferred->reject(...)));
-    return $deferred->promise;
-}
+// Chaining: a returned promise is adopted
+$user = fetchUser($id)
+    ->then(fn (array $row) => fetchProfile($row['id']))
+    ->then(fn (array $profile) => $profile['name'])
+    ->catch(fn (Throwable $e) => 'anonymous')
+    ->finally(fn () => $log->debug('done'));
 
-loadChunk(0, 0)->observe(
-    fn(Chunk $chunk) => $player->sendChunk($chunk),
-    fn(Throwable $e) => $logger->logException($e),
-);
+// Inspection
+$promise->isPending();
+$promise->isFulfilled();
+$promise->isRejected();
+$promise->value();  // the value, or throws the reason (LogicException while pending)
+$promise->reason(); // the Throwable, or null
+
+// Already settled
+$ok = Promise::resolved(42);
+$no = Promise::rejected(new RuntimeException('nope'));
+
+// Combinators (array keys are preserved)
+Promise::all(['a' => $a, 'b' => $b]);  // values by key, rejects on the first rejection
+Promise::allSettled([$a, $b]);         // the same promises, once all are settled
+Promise::race([$a, $b]);               // settles like the first one to settle
+Promise::any([$a, $b]);                // first fulfilment, or AggregateException::$reasons
 ```
 
-`observe()` is the cheapest way to consume a promise because it doesn't create another one. Use `then()`, `catch()` and
-`finally()` when you need a derived promise:
+Cancellation turns late results into no-ops, so a slow worker can finish safely after a timeout:
 
 ```php
-$world->requestChunk($x, $z)
-    ->then(fn(Chunk $chunk) => $world->findSafeSpawn($chunk))   // a returned promise is adopted
-    ->catch(fn(Throwable $e) => $world->getSpawnLocation())      // a rejection can be recovered
-    ->then(fn(Position $spawn) => $player->teleport($spawn))     // a plain value is passed on
-    ->finally(fn() => $loader->release());                      // runs either way, the outcome passes through
+$deferred = new Deferred();
+$deferred->cancel();         // rejects with CancelledException
+$deferred->resolve('late');  // ignored
 ```
 
-Settled promises can be read directly, and combinators keep array keys and input order:
+Unhandled rejections go to `error_log()` by default:
 
 ```php
-$promise->isPending(); $promise->isFulfilled(); $promise->isRejected();
-$promise->value();   // the value, or throws the reason (or LogicException while pending)
-$promise->reason();  // the Throwable, or null unless rejected
-
-Promise::resolved($value);
-Promise::rejected($reason);
-Promise::all(['a' => $a, 'b' => $b]);   // fulfils with ['a' => ..., 'b' => ...], rejects on the first rejection
-Promise::allSettled($promises);          // fulfils with the same promises once all are settled
-Promise::race($promises);                // settles like the first to settle
-Promise::any($promises);                 // first fulfilment, or AggregateException with every reason
+Promise::setRejectionHandler(fn (Throwable $e) => $logger->error($e->getMessage(), ['exception' => $e]));
 ```
 
-### Fibers
-
-`Promise::async()` runs a function in a fiber where `await()` suspends on pending promises. It needs no event loop, the
-fiber resumes inside whatever settles the promise it waits on.
+`Promise::async()` runs a function in a fiber, and `await()` suspends it until a pending promise settles:
 
 ```php
-$promise = Promise::async(function () use ($db, $player): int {
-    $row = $db->fetch($player->getUuid())->await();
-    return $db->save($row->withLogin(time()))->await();
+$result = Promise::async(function () use ($client) {
+    $user = $client->fetchUser(1)->await();
+    $posts = $client->fetchPosts($user['id'])->await();
+    return count($posts);
 });
 ```
 
-`await()` on a settled promise works anywhere. On a pending promise it only works inside `Promise::async()`, and throws
-a `LogicException` elsewhere instead of blocking.
+`await()` on a pending promise outside `Promise::async()` throws a `LogicException`.
 
-## How it behaves
+## Guarantees
 
-**Callbacks are synchronous.** When a promise settles, its callbacks run before `resolve()` or `reject()` returns.
-When it is already settled, a new callback runs before `then()` or `observe()` returns. Nothing is ever deferred to a
-later tick, and there is no queue to pump.
+- Callbacks run synchronously, never on a later tick: before `resolve()` returns, or before `then()` or `observe()` returns if the promise is already settled.
+- Callbacks run in registration order.
+- Derived promises settle after their parent's callbacks have run, so long chains do not grow the stack.
+- A promise settles exactly once. A second `resolve()` or `reject()` throws `LogicException`, except after `cancel()`.
+- If an `observe()` callback throws, the others still run and the first exception is rethrown from `resolve()` or `reject()`.
+- Unhandled rejections are reported when the promise is released. Cancellations are never reported.
+- Promises are not thread-safe. Settle them on the thread that owns them.
 
-**Ordering is deterministic.** A promise runs its callbacks in registration order. A callback registered while the
-promise is running its callbacks runs after the ones already registered. Promises derived with `then()` settle after
-their parent has run all of its callbacks, so a chain of a hundred thousand `then()`s doesn't grow the stack.
+## Benchmarks
 
-**Settlement happens once.** A second `resolve()` or `reject()` throws a `LogicException`. Resolving with a promise
-throws an `InvalidArgumentException`, because `then()` callbacks are the place to return promises. A callback
-returning the promise it belongs to, or a promise waiting on it, rejects with a `LogicException` rather than hanging.
+PHP 8.4, median of interleaved runs in fresh processes. Nanoseconds per operation, lower is better.
 
-**Callback exceptions don't break other subscribers.** A `then()` callback that throws rejects its derived promise. An
-`observe()` callback that throws doesn't stop the remaining callbacks, and the first exception is rethrown from the
-`resolve()` or `reject()` call that settled the promise once they have all run.
+JIT off:
 
-**Cancellation belongs to the owner.** `Deferred::cancel()` rejects with a `CancelledException` and makes later
-`resolve()` and `reject()` calls no-ops, so a worker that finishes after a cancellation or timeout is harmless. Only the
-`Deferred` can cancel, so one consumer can't cancel work that others are still waiting for. Timeouts are a cancel
-scheduled with whatever timer you already have:
+| Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
+| --- | --- | --- | --- | --- | --- |
+| create + resolve | 285 | 389 | 387 | 1,134 | 451 |
+| pending, 1 handler | 709 | 675 | 733 | 3,282 | 9,227 |
+| settled, then 1 handler | 402 | 535 | 650 | 1,599 | 9,413 |
+| chain of 10 | 6,867 | 9,139 | 9,913 | 24,326 | 36,752 |
+| all() of 10 | 10,740 | 11,057 | 11,938 | 42,261 | – |
 
-```php
-$timer = $scheduler->scheduleDelayedTask(new ClosureTask(fn() => $deferred->cancel(new CancelledException('Timed out'))), 20 * 30);
-$deferred->promise->finally(fn() => $timer->cancel());
+JIT tracing:
+
+| Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
+| --- | --- | --- | --- | --- | --- |
+| create + resolve | 159 | 331 | 334 | 789 | 317 |
+| pending, 1 handler | 348 | 531 | 576 | 2,435 | 8,163 |
+| settled, then 1 handler | 203 | 446 | 556 | 1,040 | 8,089 |
+| chain of 10 | 3,976 | 8,162 | 8,072 | 18,442 | 32,007 |
+| all() of 10 | 6,099 | 9,650 | 10,225 | 30,607 | – |
+
+Memory, bytes per pending promise with one handler:
+
+| Vow | Quark | xSuperr | ReactPHP | Amp |
+| --- | --- | --- | --- | --- |
+| 409 | 705 | 705 | 4,728 | 3,184 |
+
+Without JIT, settling a pending promise is about 5-12% slower than Quark's minimal promises because callback exceptions are isolated. With JIT, Vow is the fastest in every scenario above.
+
+Full results are in [bench/RESULTS.md](bench/RESULTS.md). To reproduce:
+
 ```
-
-**Rejections nobody handles are reported.** A rejected promise with no rejection handler is reported once the last
-reference to it is gone, which with PHP's reference counting is right away unless it sits in a cycle. Cancellations are
-never reported. The default report goes to `error_log()`:
-
-```php
-Promise::setRejectionHandler(fn(Throwable $e) => $logger->logException($e));
+cd bench && composer install && php run.php
 ```
-
-**Promises belong to one thread.** Settle them on the thread that created them, for example from an async task's
-completion callback on the main thread, never from inside the worker.
-
-## Performance
-
-Vow allocates two objects per pending promise, and one array once the first callback is registered. Settled promises
-drop their callbacks immediately. Compared with Quark's current promises it uses 42% less memory per pending promise.
-With the tracing JIT it is faster in every scenario, about 1.5 times for a promise with one handler and 2 times for
-chains. Without JIT, creating, chaining and pre-settled promises are still faster, while settling a pending promise is
-5 to 12% slower, the cost of isolating callback exceptions from each other. Full numbers against Quark, xSuperr/Promise,
-ReactPHP and Amp are in [bench/RESULTS.md](bench/RESULTS.md), and [bench/](bench) has the harness to reproduce them.
-
-## Quark
-
-[docs/quark-migration.md](docs/quark-migration.md) covers replacing `quark\promise` and `CompressBatchPromise`.
 
 ## Development
 
@@ -131,7 +132,6 @@ ReactPHP and Amp are in [bench/RESULTS.md](bench/RESULTS.md), and [bench/](bench
 composer install
 composer test
 composer analyse
-cd bench && composer install && php run.php
 ```
 
 ## License
