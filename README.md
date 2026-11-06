@@ -1,139 +1,183 @@
 # Vow
 
-Synchronous, strongly typed promises for PHP 8.4. No dependencies, no event loop.
+A lightweight, strongly typed promise library for PHP 8.4. Built for performance, with no dependencies or event loop required.
 
-```
+```bash
 composer require trix/vow
 ```
 
 ## Quick start
 
+Create a `Deferred` to resolve or reject a promise, and use `observe()` to handle the result.
+
 ```php
 use Vow\Deferred;
 
 $deferred = new Deferred();
+
 $deferred->promise->observe(
     fn (string $body) => print "got $body\n",
     fn (Throwable $e) => print "failed: {$e->getMessage()}\n",
 );
 
-$deferred->resolve('hello'); // or $deferred->reject(new RuntimeException('boom'))
+$deferred->resolve('hello');
+// or $deferred->reject(new RuntimeException('boom'));
 ```
 
-Keep the `Deferred` with the operation and hand out `$deferred->promise`. The promise is read-only, so consumers cannot settle it.
+Keep the `Deferred` where the operation is handled and pass its promise to consumers. Promises are read-only, so they can't be resolved or rejected from the outside.
 
 ## API
 
-```php
-use Vow\Promise;
+### Chaining
 
-// Chaining: a returned promise is adopted
+Use `then()`, `catch()`, and `finally()` to chain operations. If a callback returns another promise, Vow automatically adopts its result.
+
+```php
 $user = fetchUser($id)
     ->then(fn (array $row) => fetchProfile($row['id']))
     ->then(fn (array $profile) => $profile['name'])
     ->catch(fn (Throwable $e) => 'anonymous')
     ->finally(fn () => $log->debug('done'));
+```
 
-// Inspection
+### Inspecting promises
+
+```php
 $promise->isPending();
 $promise->isFulfilled();
 $promise->isRejected();
-$promise->value();  // the value, or throws the reason (LogicException while pending)
-$promise->reason(); // the Throwable, or null
 
-// Already settled
-$ok = Promise::resolved(42);
-$no = Promise::rejected(new RuntimeException('nope'));
-
-// Combinators (array keys are preserved)
-Promise::all(['a' => $a, 'b' => $b]);  // values by key, rejects on the first rejection
-Promise::allSettled([$a, $b]);         // the same promises, once all are settled
-Promise::race([$a, $b]);               // settles like the first one to settle
-Promise::any([$a, $b]);                // first fulfilment, or AggregateException::$reasons
+$promise->value();  // Returns the value or throws
+$promise->reason(); // Returns the rejection reason or null
 ```
 
-Cancellation turns late results into no-ops, so a slow worker can finish safely after a timeout:
+Calling `value()` on a pending promise throws a `LogicException`. Rejected promises throw their rejection reason.
+
+### Creating settled promises
+
+```php
+use Vow\Promise;
+
+$ok = Promise::resolved(42);
+$no = Promise::rejected(new RuntimeException('nope'));
+```
+
+### Combinators
+
+Vow includes the usual promise combinators, with array keys preserved.
+
+```php
+Promise::all(['a' => $a, 'b' => $b]); // All values, or the first rejection
+Promise::allSettled([$a, $b]);        // Wait for every result
+Promise::race([$a, $b]);              // First to settle
+Promise::any([$a, $b]);               // First to fulfill
+```
+
+If every promise passed to `any()` rejects, the result is an `AggregateException` containing the individual reasons in `$reasons`.
+
+### Cancellation
+
+Cancelled promises ignore late results, making it safe for an operation to finish after a timeout.
 
 ```php
 $deferred = new Deferred();
-$deferred->cancel();         // rejects with CancelledException
-$deferred->resolve('late');  // ignored
+
+$deferred->cancel();        // Rejects with CancelledException
+$deferred->resolve('late'); // Ignored
 ```
 
-Unhandled rejections go to `error_log()` by default:
+### Unhandled rejections
+
+Unhandled rejections are written to `error_log()` by default. You can provide your own handler:
 
 ```php
-Promise::setRejectionHandler(fn (Throwable $e) => $logger->error($e->getMessage(), ['exception' => $e]));
+Promise::setRejectionHandler(
+    fn (Throwable $e) => $logger->error(
+        $e->getMessage(),
+        ['exception' => $e],
+    ),
+);
 ```
 
-`Promise::async()` runs a function in a fiber, and `await()` suspends it until a pending promise settles:
+### Async / await
+
+Vow supports PHP fibers through `Promise::async()` and `await()`, allowing asynchronous-looking code without callbacks at every step.
 
 ```php
 $result = Promise::async(function () use ($client) {
     $user = $client->fetchUser(1)->await();
     $posts = $client->fetchPosts($user['id'])->await();
+
     return count($posts);
 });
 ```
 
-`await()` on a pending promise outside `Promise::async()` throws a `LogicException`.
+`async()` runs the function in a fiber, while `await()` suspends it until the promise settles.
 
-## Guarantees
+Calling `await()` on a pending promise outside `Promise::async()` throws a `LogicException`.
 
-- Callbacks run synchronously, never on a later tick: before `resolve()` returns, or before `then()` or `observe()` returns if the promise is already settled.
-- Callbacks run in registration order.
-- Derived promises settle after their parent's callbacks have run, so long chains do not grow the stack.
-- A promise settles exactly once. A second `resolve()` or `reject()` throws `LogicException`, except after `cancel()`.
-- If an `observe()` callback throws, the others still run and the first exception is rethrown from `resolve()` or `reject()`.
-- Unhandled rejections are reported when the promise is released. Cancellations are never reported.
-- Promises are not thread-safe. Settle them on the thread that owns them.
+## Behavior
+
+Vow keeps promise execution predictable:
+
+- **Synchronous callbacks.** Handlers run immediately when a promise settles, or when attached to an already settled promise.
+- **Consistent ordering.** Callbacks execute in the order they were registered.
+- **Stack-safe chains.** Derived promises settle after their parent's callbacks, avoiding stack growth in long chains.
+- **Single settlement.** Promises can only settle once. Repeated calls throw a `LogicException`, except after cancellation.
+- **Callback isolation.** If an `observe()` callback throws, the remaining callbacks still run. The first exception is then rethrown.
+- **Unhandled rejections.** Rejections are reported when the promise is released. Cancellations are excluded.
+- **Thread ownership.** Promises aren't thread-safe and must be settled on their owning thread.
 
 ## Benchmarks
 
-PHP 8.4, median of interleaved runs in fresh processes. Nanoseconds per operation, lower is better.
+Benchmarked on PHP 8.4 using the median of interleaved runs in fresh processes. Results are measured in nanoseconds per operation (**lower is better**).
 
-JIT off:
+### Without JIT
 
 | Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
 | --- | --- | --- | --- | --- | --- |
-| create + resolve | 285 | 389 | 387 | 1,134 | 451 |
-| pending, 1 handler | 709 | 675 | 733 | 3,282 | 9,227 |
-| settled, then 1 handler | 402 | 535 | 650 | 1,599 | 9,413 |
-| chain of 10 | 6,867 | 9,139 | 9,913 | 24,326 | 36,752 |
+| Create + resolve | 285 | 389 | 387 | 1,134 | 451 |
+| Pending, 1 handler | 709 | 675 | 733 | 3,282 | 9,227 |
+| Settled, 1 handler | 402 | 535 | 650 | 1,599 | 9,413 |
+| Chain of 10 | 6,867 | 9,139 | 9,913 | 24,326 | 36,752 |
 | all() of 10 | 10,740 | 11,057 | 11,938 | 42,261 | – |
 
-JIT tracing:
+### With JIT (tracing)
 
 | Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
 | --- | --- | --- | --- | --- | --- |
-| create + resolve | 159 | 331 | 334 | 789 | 317 |
-| pending, 1 handler | 348 | 531 | 576 | 2,435 | 8,163 |
-| settled, then 1 handler | 203 | 446 | 556 | 1,040 | 8,089 |
-| chain of 10 | 3,976 | 8,162 | 8,072 | 18,442 | 32,007 |
+| Create + resolve | 159 | 331 | 334 | 789 | 317 |
+| Pending, 1 handler | 348 | 531 | 576 | 2,435 | 8,163 |
+| Settled, 1 handler | 203 | 446 | 556 | 1,040 | 8,089 |
+| Chain of 10 | 3,976 | 8,162 | 8,072 | 18,442 | 32,007 |
 | all() of 10 | 6,099 | 9,650 | 10,225 | 30,607 | – |
 
-Memory, bytes per pending promise with one handler:
+### Memory usage
+
+Bytes per pending promise with one handler (**lower is better**).
 
 | Vow | Quark | xSuperr | ReactPHP | Amp |
 | --- | --- | --- | --- | --- |
 | 409 | 705 | 705 | 4,728 | 3,184 |
 
-Without JIT, settling a pending promise is about 5-12% slower than Quark's minimal promises because callback exceptions are isolated. With JIT, Vow is the fastest in every scenario above.
+Vow performs well across the benchmarks, particularly with JIT enabled, where it leads in every tested scenario.
 
-Full results are in [bench/RESULTS.md](bench/RESULTS.md). To reproduce:
+Without JIT, settling a pending promise with one handler is slightly slower than Quark's minimal implementation. This is partly due to the additional handling of callback exceptions.
 
-```
-cd bench && composer install && php run.php
+See [bench/RESULTS.md](bench/RESULTS.md) for the full results and methodology.
+
+To run the benchmarks yourself:
+
+```bash
+cd bench
+composer install
+php run.php
 ```
 
 ## Development
 
-```
+```bash
 composer install
 composer test
 composer analyse
 ```
-
-## License
-
-MIT
