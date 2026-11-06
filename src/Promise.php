@@ -21,6 +21,8 @@ use function count;
  * is already settled they run before the registering call returns. A promise's callbacks always run in the
  * order they were registered, and derived promises settle only after their parent finished its own callbacks.
  *
+ * Pending promises come from a Deferred, which is the only way to settle them.
+ *
  * @template-covariant T
  */
 final class Promise
@@ -45,13 +47,6 @@ final class Promise
 
     /** @var WeakMap<Fiber<mixed, mixed, mixed, mixed>, Promise<mixed>>|null */
     private static ?WeakMap $fibers = null;
-
-    /**
-     * @internal Use a Deferred to create pending promises.
-     */
-    public function __construct()
-    {
-    }
 
     /**
      * @template V
@@ -445,7 +440,58 @@ final class Promise
             }
             return;
         }
-        self::drain($this);
+
+        // Derived promises settled along the way are queued and run after this one, which keeps long chains off
+        // the call stack. Handlers registered while these run land in the fresh array and get picked up next pass.
+        $current = $this;
+        $queue = [];
+        $error = null;
+        for ($q = 0; ; ++$q) {
+            $handled = false;
+            $handlers = $current->handlers ?? [];
+            while ($handlers !== []) {
+                $current->handlers = [];
+                for ($i = 0, $n = count($handlers); $i < $n; $i += 3) {
+                    $child = $handlers[$i + 2];
+                    if ($child instanceof self) {
+                        $handled = true;
+                        if (self::invoke($fulfilled, $result, $handlers[$i], $handlers[$i + 1], $child)) {
+                            $queue[] = $child;
+                        }
+                        continue;
+                    }
+                    $callback = $handlers[$fulfilled ? $i : $i + 1];
+                    if (!$callback instanceof Closure) {
+                        continue;
+                    }
+                    $handled = true;
+                    try {
+                        $callback($result);
+                    } catch (Throwable $e) {
+                        if ($error === null) {
+                            $error = $e;
+                        } else {
+                            UnhandledRejection::report($e);
+                        }
+                    }
+                }
+                $handlers = $current->handlers ?? [];
+            }
+            $current->handlers = null;
+            if (!$fulfilled && !$handled) {
+                $current->track();
+            }
+            if (!isset($queue[$q])) {
+                break;
+            }
+            $current = $queue[$q];
+            unset($queue[$q]);
+            $fulfilled = $current->state === self::FULFILLED;
+            $result = $current->result;
+        }
+        if ($error !== null) {
+            throw $error;
+        }
     }
 
     private function __clone()
@@ -468,59 +514,8 @@ final class Promise
     }
 
     /**
-     * Runs the handlers of a freshly settled promise, then those of every derived promise it settled. The queue
-     * keeps long chains off the call stack.
-     *
-     * @param Promise<mixed> $promise
-     */
-    private static function drain(Promise $promise): void
-    {
-        $queue = [$promise];
-        $error = null;
-        for ($q = 0; isset($queue[$q]); ++$q) {
-            $current = $queue[$q];
-            unset($queue[$q]);
-            $fulfilled = $current->state === self::FULFILLED;
-            $result = $current->result;
-            $handled = false;
-            // handlers may grow while running, so the property is read in place rather than copied
-            for ($i = 0; $i < count($current->handlers ?? []); $i += 3) {
-                $child = $current->handlers[$i + 2] ?? null;
-                if ($child instanceof self) {
-                    $handled = true;
-                    if (self::invoke($fulfilled, $result, $current->handlers[$i] ?? null, $current->handlers[$i + 1] ?? null, $child)) {
-                        $queue[] = $child;
-                    }
-                    continue;
-                }
-                $callback = $current->handlers[$fulfilled ? $i : $i + 1] ?? null;
-                if (!$callback instanceof Closure) {
-                    continue;
-                }
-                $handled = true;
-                try {
-                    $callback($result);
-                } catch (Throwable $e) {
-                    if ($error === null) {
-                        $error = $e;
-                    } else {
-                        UnhandledRejection::report($e);
-                    }
-                }
-            }
-            $current->handlers = null;
-            if (!$fulfilled && !$handled) {
-                $current->track();
-            }
-        }
-        if ($error !== null) {
-            throw $error;
-        }
-    }
-
-    /**
      * Settles the child of a then() from its parent's outcome. Returns whether the child settled right away and
-     * needs draining, as opposed to following a promise that is still pending.
+     * needs its handlers run, as opposed to following a promise that is still pending.
      *
      * @param Closure|Promise<mixed>|null $onFulfilled
      * @param Closure|Promise<mixed>|null $onRejected
@@ -601,12 +596,15 @@ final class Promise
             return;
         }
         unset($fibers[$fiber]);
-        if ($value instanceof self) {
-            if ($promise->adopt($value)) {
-                self::drain($promise);
-            }
-            return;
+        if ($value === $promise) {
+            $promise->settle(false, new LogicException('Circular promise resolution'));
+        } elseif ($value instanceof self) {
+            $value->observe(
+                static function (mixed $value) use ($promise): void { $promise->settle(true, $value); },
+                static function (Throwable $reason) use ($promise): void { $promise->settle(false, $reason); },
+            );
+        } else {
+            $promise->settle(true, $value);
         }
-        $promise->settle(true, $value);
     }
 }
