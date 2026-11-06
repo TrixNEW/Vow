@@ -1,0 +1,21 @@
+{
+    "name": "trix/vow-bench",
+    "description": "Benchmarks for trix/vow",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.4",
+        "react/promise": "^3.2",
+        "amphp/amp": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Vow\\": "../src/"
+        },
+        "classmap": [
+            "competitors/"
+        ]
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
