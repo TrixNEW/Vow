@@ -33,6 +33,6 @@ jobs:
           php-version: '8.4'
           coverage: none
       - run: composer install --no-interaction --no-progress
-        working-directory: bench
+        working-directory: tests/bench
       - run: php run.php --rounds=1 --samples=1 --no-jit
-        working-directory: bench
+        working-directory: tests/bench
