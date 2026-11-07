@@ -164,12 +164,12 @@ Vow performs well across the benchmarks, particularly with JIT enabled, where it
 
 Without JIT, settling a pending promise with one handler is slightly slower than Quark's minimal implementation. This is partly due to the additional handling of callback exceptions.
 
-See [bench/RESULTS.md](bench/RESULTS.md) for the full results and methodology.
+See [tests/bench/RESULTS.md](tests/bench/RESULTS.md) for the full results and methodology.
 
 To run the benchmarks yourself:
 
 ```bash
-cd bench
+cd tests/bench
 composer install
 php run.php
 ```
