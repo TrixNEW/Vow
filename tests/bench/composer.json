@@ -1,6 +1,6 @@
 {
-    "name": "trix/vow-bench",
-    "description": "Benchmarks for trix/vow",
+    "name": "trixnew/vow-bench",
+    "description": "Benchmarks for trixnew/vow",
     "type": "project",
     "license": "MIT",
     "require": {

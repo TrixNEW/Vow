@@ -3,7 +3,7 @@
 A lightweight, strongly typed promise library for PHP 8.4. Built for performance, with no dependencies or event loop required.
 
 ```bash
-composer require trix/vow
+composer require trixnew/vow
 ```
 
 ## Quick start
