@@ -134,35 +134,33 @@ Benchmarked on PHP 8.4 using the median of interleaved runs in fresh processes. 
 
 ### Without JIT
 
-| Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
-| --- | --- | --- | --- | --- | --- |
-| Create + resolve | 285 | 389 | 387 | 1,134 | 451 |
-| Pending, 1 handler | 709 | 675 | 733 | 3,282 | 9,227 |
-| Settled, 1 handler | 402 | 535 | 650 | 1,599 | 9,413 |
-| Chain of 10 | 6,867 | 9,139 | 9,913 | 24,326 | 36,752 |
-| all() of 10 | 10,740 | 11,057 | 11,938 | 42,261 | – |
+| Scenario | Vow | ReactPHP | Amp |
+| --- | --- | --- | --- |
+| Create + resolve | 285 | 1,134 | 451 |
+| Pending, 1 handler | 709 | 3,282 | 9,227 |
+| Settled, 1 handler | 402 | 1,599 | 9,413 |
+| Chain of 10 | 6,867 | 24,326 | 36,752 |
+| all() of 10 | 10,740 | 42,261 | – |
 
 ### With JIT (tracing)
 
-| Scenario | Vow | Quark | xSuperr | ReactPHP | Amp |
-| --- | --- | --- | --- | --- | --- |
-| Create + resolve | 159 | 331 | 334 | 789 | 317 |
-| Pending, 1 handler | 348 | 531 | 576 | 2,435 | 8,163 |
-| Settled, 1 handler | 203 | 446 | 556 | 1,040 | 8,089 |
-| Chain of 10 | 3,976 | 8,162 | 8,072 | 18,442 | 32,007 |
-| all() of 10 | 6,099 | 9,650 | 10,225 | 30,607 | – |
+| Scenario | Vow | ReactPHP | Amp |
+| --- | --- | --- | --- |
+| Create + resolve | 159 | 789 | 317 |
+| Pending, 1 handler | 348 | 2,435 | 8,163 |
+| Settled, 1 handler | 203 | 1,040 | 8,089 |
+| Chain of 10 | 3,976 | 18,442 | 32,007 |
+| all() of 10 | 6,099 | 30,607 | – |
 
 ### Memory usage
 
 Bytes per pending promise with one handler (**lower is better**).
 
-| Vow | Quark | xSuperr | ReactPHP | Amp |
-| --- | --- | --- | --- | --- |
-| 409 | 705 | 705 | 4,728 | 3,184 |
+| Vow | ReactPHP | Amp |
+| --- | --- | --- |
+| 409 | 4,728 | 3,184 |
 
 Vow performs well across the benchmarks, particularly with JIT enabled, where it leads in every tested scenario.
-
-Without JIT, settling a pending promise with one handler is slightly slower than Quark's minimal implementation. This is partly due to the additional handling of callback exceptions.
 
 See [tests/bench/RESULTS.md](tests/bench/RESULTS.md) for the full results and methodology.
 
